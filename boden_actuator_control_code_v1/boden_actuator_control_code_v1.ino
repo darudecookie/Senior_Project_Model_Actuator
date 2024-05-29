@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <AccelStepper.h>
 #include <FastPID.h>
+#include <TimerThree.h>
 
 // number of axes
 //******IMPORTANT*********
@@ -29,8 +30,8 @@ long global_time;
 // joint param
 const int motor_pins[stepper_servo_axes][2] = {
   // pins motors are plugged into, order {step, direction}
-  { 25, 23 },
-  { 29, 27 },
+  { 23, 25 },
+  { 27, 29 },
 };
 const float microsteps_reduction_params[stepper_servo_axes][2] = {
   // microsteps and reduction of each gearbox, order {microsteps, reduction}. 1 degree of joint movement = motor_steps_per_rev * microsteps * gearbox_reduction / 360                                                                                                                             // gear stepper microsteps and gear reduction for each axes, order {microstep, reduction}
@@ -38,14 +39,16 @@ const float microsteps_reduction_params[stepper_servo_axes][2] = {
   { 8, 2.60869 },
 };
 const long speed_accel_params[stepper_servo_axes][2] = { { 500, 1000 }, { 500, 1000 } };  // speed and acceleration params of motor, in steps/second (including microsteps), order: {speed, acceleration}
-const int joint_lims[stepper_servo_axes][2] = {                                           // joint limits for each axis, the only ones that are really updated are for axis 2 as of 5/3
+const float joint_lims[stepper_servo_axes][2] = {                                         // joint limits for each axis, the only ones that are really updated are for axis 2 as of 5/3
   { -70, 40 },
-  { -180, 180 }
+  { -50, 45 }
 };
 const long PID_params[stepper_servo_axes][3] = {  // pid params
-  { 8, 0, 0 },
-  { 8, 0, 0 }
+  { 2, 0.1, 0.25 },
+  { 3, 0.1, 4 }
 };
+const int plus_minus_range = 90;
+
 const float angle_offset_sign[stepper_servo_axes][2] = { { 25, 0.383386 }, { -333, 0.383386 } };  // angle offset for encoder input, first value is added and the second is multiplied by the encoder input
 
 // class that combines steppers and encoders into unified servo object
@@ -87,8 +90,13 @@ public:
 
       output_val = PID_controller_Object->step(target_angles[joint_num], actual_angles[joint_num]);
 
+
+      output_val = -output_val;
+      //output_val = (joint_num == 0) ? -output_val : -output_val;
+
       /*
-      if (joint_num == 1) {
+      if (joint_num == 0) {
+
         Serial.print("output: ");
         Serial.print(output_val);
         Serial.print(" actual: ");
@@ -97,7 +105,6 @@ public:
         Serial.println(target_angles[joint_num]);
       }
 */
-      output_val = (joint_num == 0) ? -output_val : output_val;
       stepper_motor->move(output_val);  // moves to appropriate
                                         // again this code was copied from internet. my understanding is that if stepper should move and it's not paused, func adds stepper->move() command to a queue when arduino processor is free
                                         // this code works well from testing, steppers move quickly and smoothly but other funcs. are not bogged down, unlike previous blocking approach or others
@@ -149,30 +156,40 @@ inline bool check_runtime(long inp_last_time, int inp_runtime_interval_microsecs
   return false;
 }
 
+inline float bound(float val, float bound[2]) {
+  if (bound[0] <= val && val <= bound[1]) {
+    return val;
+  } else if (val > bound[1]) {
+    return bound[1];
+  } else {
+    return bound[0];
+  }
+}
 
 void update_from_joystick() {
   static long last_time = 0;  // last time func. was run
   const int runtime_interval = 500;
 
-  const int y_pin = 3;
-  const int x_pin = 4;
-  const int button_pin = 5;
+  const int y_pin = 13;
+  const int x_pin = 14;
+  const int button_pin = 15;
 
 
-  const float x_reduction_factor = 200;
-  const float y_reduction_factor = x_reduction_factor;
+  const float x_reduction_factor = -2500;
+  const float y_reduction_factor = -1000;
 
   if (check_runtime(last_time, runtime_interval)) {
     last_time = global_time;
 
     int x_val = map(analogRead(x_pin), 0, 1023, -180, 180);
     int y_val = map(analogRead(y_pin), 0, 1023, -180, 180);
-
     int button_val = analogRead(button_pin);
-    if (abs(x_val) < 10) { x_val = 0; }
+    if (abs(x_val) < 5) { x_val = 0; }
     if (abs(y_val) < 10) { y_val = 0; }
 
-    if (button_val > 200) {
+
+
+    if (button_val < 200) {
       for (int i = 0; i < 2; i++) {
         target_angles[i] = 0;
         new_target_angles[i] = true;
@@ -180,10 +197,18 @@ void update_from_joystick() {
     } else {
       target_angles[0] += x_val / x_reduction_factor;
       target_angles[1] += y_val / y_reduction_factor;
+
       for (int i = 0; i < 2; i++) {
+        target_angles[i] = bound(target_angles[i], joint_lims[i]);
         new_target_angles[i] = true;
       }
     }
+  }
+}
+
+void run_motors() {
+  for (int i = 0; i < 2; i++) {
+    StepperServo_array[i]->stepper_motor->run();
   }
 }
 
@@ -194,6 +219,9 @@ void setup() {
   for (int i = 0; i < stepper_servo_axes; i++) {
     StepperServo_array[i] = new StepperServo(i);  // remember args
   }
+
+  Timer3.initialize(500);
+  Timer3.attachInterrupt(run_motors);
 
   Serial.println("");
   Serial.println("end setup!");
@@ -209,33 +237,28 @@ void loop() {
 
 
   update_from_joystick();
-  if (StepperServo_array[0]->stepper_motor->distanceToGo() != 0 && StepperServo_array[1]->stepper_motor->distanceToGo()) {
-    do {
-      StepperServo_array[0]->stepper_motor->run();
-      StepperServo_array[1]->stepper_motor->run();
-      yield();
-    } while (StepperServo_array[0]->stepper_motor->distanceToGo() != 0 && StepperServo_array[1]->stepper_motor->distanceToGo());  // the is running var makes sure that the motor stops immediately when it should
+
+  static long pid_check = 0;
+  //Serial.println(analogRead(15));
+
+  if ((millis() - pid_check) > (100) && true) {
+    Serial.print(-plus_minus_range);
+    Serial.print("  ");
+    //Serial.print(plus_minus_range);
+    //Serial.print("  ");
+
+    Serial.print(actual_angles[0]);
+    Serial.print("  ");
+    Serial.print(target_angles[0]);
+
+    Serial.print("  ");
+
+    Serial.print(actual_angles[1]);
+    Serial.print("  ");
+    Serial.print(target_angles[1]);
+
+    Serial.print("  ");
+    Serial.println(plus_minus_range);
+    pid_check = millis();
   }
-  //float angle = (float)(analogRead(joint_num)) * angle_offset_sign[joint_num][1] + angle_offset_sign[joint_num][0];
-
-  /*
-  Serial.print(((float)(analogRead(1)) * angle_offset_sign[1][1]) + angle_offset_sign[1][0]);
-  Serial.print("   ");
-  //Serial.println(((float)(analogRead(2)) * angle_offset_sign[2][1]) + angle_offset_sign[2][0]);
-  Serial.println(((float)(analogRead(2)) * angle_offset_sign[2][1]) + angle_offset_sign[2][0]);
-
-
-  Serial.print(actual_angles[0]);
-  Serial.print("  ");
-  Serial.println(actual_angles[1]);
-
-
-*/
-  Serial.print(target_angles[0]);
-  Serial.print("  ");
-  Serial.println(target_angles[1]);
-
 }
-
-//update_from_serial();
-//manage_e_stop();
